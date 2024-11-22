@@ -1,57 +1,71 @@
-use std::{env, error::Error, fmt::Display};
+use std::{collections::HashMap, env, num::ParseIntError};
 
+use anyhow::{anyhow, Result};
+use checker::AvailabilityChecker;
+use discord::WebhookClient;
 use shopify::ShopifyClient;
-use webhook::{EmbedData, WebhookBuilder, WebhookClient};
+use tokio::signal::unix::{signal, SignalKind};
+use utils::{get_scheduler_from_env, sleep_until_next, webhook_from_product};
 
+pub mod checker;
+pub mod discord;
 pub mod shopify;
-pub mod webhook;
+pub mod utils;
 
-#[derive(Debug)]
-enum MonitorError {
-    NoProductIds,
-    ProductNotFound(i64)
-}
+async fn run_checker() -> Result<()> {
+    let shopify_client = ShopifyClient::from_env()?;
+    let discord_client = WebhookClient::from_env()?;
+    let checker = AvailabilityChecker::new(&shopify_client);
 
-impl Error for MonitorError { }
-impl Display for MonitorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoProductIds => write!(f, "no product IDs given"),
-            Self::ProductNotFound(id) => write!(f, "product with ID {} not found", id),
+    let product_ids = env::var("PRODUCT_IDS")?
+        .split(",")
+        .map(str::trim)
+        .map(str::parse::<i64>)
+        .collect::<Result<Vec<i64>, ParseIntError>>()?;
+
+    let scheduler = get_scheduler_from_env();
+
+    loop {
+        // Get all products that have become available since the last check and collect them into a (ID -> Product) map
+        let new_products: HashMap<_, _> = checker
+            .check_newly_available()
+            .await?
+            .into_iter()
+            .map(|product| (product.id, product))
+            .collect();
+
+        // Retrieve all products from the map that we care about
+        let notify_products: Vec<_> = product_ids
+            .iter()
+            .filter_map(|id| new_products.get(id))
+            .collect();
+
+        for product in notify_products {
+            let webhook = webhook_from_product(&shopify_client, product)?;
+            discord_client.send(&webhook).await?;
         }
+
+        sleep_until_next(&scheduler).await?;
     }
 }
 
+async fn wait_for_terminate() -> Result<()> {
+    let mut sig = signal(SignalKind::terminate())?;
+
+    sig.recv()
+        .await
+        .ok_or(anyhow!("failed to listen for SIGTERM"))
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<()> {
     dotenvy::dotenv()?;
 
-    let shopify_client = ShopifyClient::from_env()?;
-    let response = shopify_client.get_all_products().await?;
-
-    let product_id = env::var("PRODUCT_IDS")?
-        .split(",")
-        .filter_map(|s| s.parse::<i64>().ok())
-        .nth(0).ok_or(MonitorError::NoProductIds)?;
-
-    let product = response.get_product(product_id)
-        .ok_or(MonitorError::ProductNotFound(product_id))?;
-
-    let webhook =
-        if product.any_variant_available() {
-            let product_link = shopify_client.get_product_link(product)?;
-
-            WebhookBuilder::new()
-                .content(format!("\"{}\" is available", product.title))
-                .embeds(vec![EmbedData::from_url(&product.title, product_link, "Check it out")])
-        } else {
-            WebhookBuilder::new()
-                .content(format!("\"{}\" is not available", product.title))
-        }
-        .build();
-
-    let webhook_client = WebhookClient::from_env()?;
-    webhook_client.send(&webhook).await?;
+    // Wait for either an error from the checker or SIGTERM
+    tokio::select! {
+        Err(err) = run_checker() => println!("Error while scraping shop: {}", err),
+        _ = wait_for_terminate() => println!("Received SIGTERM, quitting..."),
+    }
 
     Ok(())
 }
