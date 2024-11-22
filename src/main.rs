@@ -59,11 +59,11 @@ async fn wait_for_terminate() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::dotenv()?;
+    let _ = dotenvy::dotenv();
 
     // Wait for either an error from the checker or SIGTERM
     tokio::select! {
-        Err(err) = run_checker() => println!("Error while scraping shop: {}", err),
+        Err(err) = run_checker() => println!("Error while scraping shop: {:?}", err),
         _ = wait_for_terminate() => println!("Received SIGTERM, quitting..."),
     }
 
