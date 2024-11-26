@@ -41,6 +41,8 @@ async fn run_checker() -> Result<()> {
             .collect();
 
         for product in notify_products {
+            println!("Notifying about {}...", product.title);
+
             let webhook = webhook_from_product(&shopify_client, product)?;
             discord_client.send(&webhook).await?;
         }

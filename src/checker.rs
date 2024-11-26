@@ -30,10 +30,12 @@ impl <'a, U : IntoUrl + Clone> AvailabilityChecker<'a, U> {
             .cloned()
             .collect();
             
-        let newly_available = available_products.iter()
+        let newly_available: Vec<Product> = available_products.iter()
             .filter(|product| !last_available_ids.contains(&product.id))
             .cloned()
             .collect();
+
+        println!("{} available total, {} became available since last check", available_products.len(), newly_available.len());
     
         Self::update_last_available(&mut last_available_ids, &available_products);
         Ok(newly_available)
